@@ -6,14 +6,10 @@
 ##                2022-01-04 (QV) added netcdf compression
 ##                2022-11-09 (QV) updates for PNEO processing
 ##                2023-02-21 (QV) new handling for unprojected and projected data
-##                2023-07-12 (QV) removed netcdf_compression settings from nc_write call
-##                2024-04-17 (QV) use new gem NetCDF handling
-##                2025-01-28 (QV) fix when pan meta is missing
-##                2025-01-30 (QV) moved polygon limit
-##                2025-02-02 (QV) removed percentiles
-##                2025-02-04 (QV) improved settings handling
 
-def l1_convert(inputfile, output = None, settings = None):
+def l1_convert(inputfile, output = None, settings = {},
+                percentiles_compute = True, percentiles = (0,1,5,10,25,50,75,90,95,99,100),
+                verbosity = 5):
 
     import os, copy
     import dateutil.parser, time
@@ -21,16 +17,7 @@ def l1_convert(inputfile, output = None, settings = None):
     import acolite as ac
     import scipy.ndimage
 
-    ## get run settings
-    setu = {k: ac.settings['run'][k] for k in ac.settings['run']}
-
-    ## additional run settings
-    if settings is not None:
-        settings = ac.acolite.settings.parse(settings)
-        for k in settings: setu[k] = settings[k]
-    ## end additional run settings
-
-    verbosity = setu['verbosity']
+    if 'verbosity' in settings: verbosity = settings['verbosity']
 
     ## parse inputfile
     if type(inputfile) != list:
@@ -73,18 +60,14 @@ def l1_convert(inputfile, output = None, settings = None):
         for pmfile in set(pmfiles):
             if pmfile == '': continue
             pmeta = ac.pleiades.metadata_parse(pmfile, pan=True)
-        sensor = meta['sensor']
 
-        ## get sensor specific defaults
-        setd = ac.acolite.settings.parse(sensor)
-        ## set sensor default if user has not specified the setting
-        for k in setd:
-            if k not in ac.settings['user']: setu[k] = setd[k]
-        ## end set sensor specific defaults
-
+        ## merge sensor specific settings
+        setu = ac.acolite.settings.parse(meta['sensor'], settings=settings)
         verbosity = setu['verbosity']
         if output is None: output = setu['output']
         limit = setu['limit']
+        poly = setu['polygon']
+        skip_pan = setu['pleiades_skip_pan']
         vname = setu['region_name']
 
         ## set resolution and band names
@@ -94,8 +77,11 @@ def l1_convert(inputfile, output = None, settings = None):
             p_resolution = 0.5
         elif meta['sensor'] in ['PNEO3', 'PNEO4']:
             btags = {'BlueCoastal':'DB', 'Blue':'B', 'Green':'G', 'Red':'R', 'RedEdge':'RE', 'NIR':'NIR', 'PAN':'PAN'}
-            ms_resolution = 1.32
-            p_resolution = 0.33
+            #ms_resolution = 1.32
+            ms_resolution = 1.2
+            #p_resolution = 0.33
+            p_resolution = 0.3
+
 
         ## parse metadata
         dtime = dateutil.parser.parse(meta['isotime'])
@@ -114,8 +100,7 @@ def l1_convert(inputfile, output = None, settings = None):
         gatts = {'sensor':meta['sensor'], 'satellite':meta['satellite'],
                  'satellite_sensor':'{}_{}'.format(meta['satellite'], meta['sensor']),
                  'isodate':isodate,
-                 'sza':meta['sza'], 'vza':meta['vza'], 'saa':meta['saa'],'vaa':meta['vaa'],
-                 'raa':meta['raa'], 'se_distance': se_distance,
+                 'sza':meta['sza'], 'vza':meta['vza'], 'raa':meta['raa'], 'se_distance': se_distance,
                  'mus': np.cos(meta['sza']*(np.pi/180.)),
                  'acolite_file_type': 'L1R'}
 
@@ -135,6 +120,17 @@ def l1_convert(inputfile, output = None, settings = None):
         gatts['oname'] = oname
         gatts['ofile'] = ofile
 
+        ## check if ROI polygon is given
+        clip, clip_mask = False, None
+        if poly is not None:
+            if os.path.exists(poly):
+                try:
+                    limit = ac.shared.polygon_limit(poly)
+                    print('Using limit from polygon envelope: {}'.format(limit))
+                    clip = True
+                except:
+                    print('Failed to import polygon {}'.format(poly))
+
         ## test scene
         if limit is not None:
             out_scene = ac.pleiades.geo.test_coverage(meta, limit, verbose=verbosity>2)
@@ -142,13 +138,14 @@ def l1_convert(inputfile, output = None, settings = None):
                 print('Provided limit {} not covered by scene'.format(limit))
                 continue
 
+        print('##################################################################')
         ## find projection info based on first file
         dct = None
         ifile = ifiles[0]
-        try:
-            dct = ac.shared.projection_read(ifile)
-        except:
-            print('Could not determine projection from {}'.format(ifile))
+        #try:
+        #    dct = ac.shared.projection_read(ifile)
+        #except:
+        #    print('Could not determine projection from {}'.format(ifile))
 
         new_method, reproject = False, False
         ## set up reprojection
@@ -241,22 +238,23 @@ def l1_convert(inputfile, output = None, settings = None):
                 gatts['global_dims'] = sub[3], sub[2]
 
             new = True
-            if new:
-                gemo = ac.gem.gem(ofile, new = True)
-                gemo.gatts = {k: gatts[k] for k in gatts}
-                datasets = gemo.datasets
-
             ## write lat/lon
             if (setu['output_geolocation']):
+                if (os.path.exists(ofile) & (not new)):
+                    datasets = ac.shared.nc_datasets(ofile)
+                else:
+                    datasets = []
                 if ('lat' not in datasets) or ('lon' not in datasets):
                     if verbosity > 1: print('Writing geolocation lon/lat')
                     lon, lat = ac.pleiades.geo.ll(meta, sub=sub)
-                    gemo.write('lon', lon)
-                    #ac.output.nc_write(ofile, 'lon', lon, attributes=gatts, new=new)
+                    ac.output.nc_write(ofile, 'lon', lon, attributes=gatts, new=new, double=True,
+                                        netcdf_compression=setu['netcdf_compression'],
+                                        netcdf_compression_level=setu['netcdf_compression_level'])
                     lon = None
                     if verbosity > 1: print('Wrote lon')
-                    #ac.output.nc_write(ofile, 'lat', lat)
-                    gemo.write('lat', lat)
+                    ac.output.nc_write(ofile, 'lat', lat, double=True,
+                                        netcdf_compression=setu['netcdf_compression'],
+                                        netcdf_compression_level=setu['netcdf_compression_level'])
                     lat = None
                     if verbosity > 1: print('Wrote lat')
                     new = False
@@ -337,11 +335,11 @@ def l1_convert(inputfile, output = None, settings = None):
                                         dct = ac.shared.projection_sub_dct(dct, sub)
                                         nc_projection = ac.shared.projection_netcdf(dct, add_half_pixel=False)
                                 except BaseException as err:
-                                    print("Could not determine projection from {} error {}".format(ifile_, type(err)))
+                                    print(f"Could not determine projection from {ifile_=} error {err=}, {ifile_=}, {type(err)=}")
                                     pass
                         else:
                             if pmeta is None: continue
-                            if setu['pleiades_skip_pan']: continue
+                            if skip_pan: continue
                             pan = True
                             if sub is None:
                                 pandims = int(pmeta['NROWS']), int(pmeta['NCOLS'])
@@ -358,13 +356,11 @@ def l1_convert(inputfile, output = None, settings = None):
                                     dct_pan = ac.shared.projection_sub_dct(dct_pan, pansub)
                                     nc_projection_pan = ac.shared.projection_netcdf(dct_pan, add_half_pixel=False)
                             except BaseException as err:
-                                print("Could not determine projection from {} error {}".format(pifile, type(err)))
+                                print(f"Could not determine projection from {pifile=} error {err=}, {pifile=}, {type(err)=}")
                                 pass
 
                         nodata = data == np.uint16(meta['NODATA'])
                         nodata2 = data == 1
-                        saturated = data >= np.uint16(meta['SATURATED']) -1
-
                         print(idx, b, btags[b])
                         data = data.astype(np.float32)
                         if (meta['RADIOMETRIC_PROCESSING'] == 'RADIANCE') | (meta['RADIOMETRIC_PROCESSING'] == 'BASIC'):
@@ -394,10 +390,12 @@ def l1_convert(inputfile, output = None, settings = None):
 
                         data[nodata] = np.nan
                         data[nodata2] = np.nan
-                        data[saturated] = np.nan
 
                         ds = 'rhot_{}'.format(rsrd['wave_name'][b])
                         ds_att = {'wavelength':rsrd['wave_nm'][b]}
+                        if percentiles_compute:
+                            ds_att['percentiles'] = percentiles
+                            ds_att['percentiles_data'] = np.nanpercentile(data, percentiles)
 
                         ## QV 2022-11-09
                         ## nc_projection does not match when using crop
@@ -415,19 +413,12 @@ def l1_convert(inputfile, output = None, settings = None):
                                 data_full = data * 1.0
 
                             ## write to netcdf file
-                            if new_pan:
-                                gemop = ac.gem.gem(pofile, new = True)
-                                gemop.gatts = {k: gatts[k] for k in gatts}
-                                gemop.nc_projection = nc_projection_pan
-
-                            if (update_projection_pan) & (nc_projection_pan is not None):
-                                print('Updating PAN projection')
-                                gemop.nc_projection = nc_projection_pan
-                            gemop.write(ds, data_full, ds_att = ds_att, replace_nan=True, update_projection = update_projection_pan)
-
-                            #ac.output.nc_write(pofile, ds, data_full, replace_nan=True, #attributes=gatts,
-                            #                    new=new_pan, dataset_attributes = ds_att,
-                            #                    nc_projection=nc_projection_pan, update_projection=update_projection_pan)
+                            ac.output.nc_write(pofile, ds, data_full, replace_nan=True, #attributes=gatts,
+                                                new=new_pan, dataset_attributes = ds_att,
+                                                nc_projection=nc_projection_pan, update_projection=update_projection_pan,
+                                                netcdf_compression=setu['netcdf_compression'],
+                                                netcdf_compression_level=setu['netcdf_compression_level'],
+                                                netcdf_compression_least_significant_digit=setu['netcdf_compression_least_significant_digit'])
                             data_full = None
                             update_projection_pan = False
                             new_pan = False
@@ -455,39 +446,36 @@ def l1_convert(inputfile, output = None, settings = None):
                         if (update_projection) & (nc_projection is not None):
                             if verbosity > 1: print('Writing geolocation lon/lat')
                             lon, lat = ac.shared.projection_geo(dct, add_half_pixel=False)
-                            print('Updating MS projection')
-                            gemo.nc_projection = nc_projection
                             print(lon.shape)
-                            #ac.output.nc_write(ofile, 'lon', lon, double=True,
-                            #                    nc_projection=nc_projection, update_projection=update_projection)
-                            gemo.write('lon', lon, update_projection = True)
+                            ac.output.nc_write(ofile, 'lon', lon, double=True,
+                                                nc_projection=nc_projection, update_projection=update_projection,
+                                                netcdf_compression=setu['netcdf_compression'],
+                                                netcdf_compression_level=setu['netcdf_compression_level'])
                             lon = None
                             update_projection = False
 
                             if verbosity > 1: print('Wrote lon')
                             print(lat.shape)
-                            #ac.output.nc_write(ofile, 'lat', lat, double=True,
-                            #                    nc_projection=nc_projection, update_projection=update_projection)
-                            gemo.write('lat', lat)
+                            ac.output.nc_write(ofile, 'lat', lat, double=True,
+                                                nc_projection=nc_projection, update_projection=update_projection,
+                                                netcdf_compression=setu['netcdf_compression'],
+                                                netcdf_compression_level=setu['netcdf_compression_level'])
                             lat = None
                             if verbosity > 1: print('Wrote lat')
+                            new=False
 
                         ## write to netcdf file
-                        #ac.output.nc_write(ofile, ds, data_full, replace_nan=True, attributes=gatts, new=new, dataset_attributes = ds_att,
-                        #                    nc_projection=nc_projection, update_projection=update_projection)
-                        gemo.write(ds, data_full, ds_att = ds_att, replace_nan=True)
+                        ac.output.nc_write(ofile, ds, data_full, replace_nan=True, attributes=gatts, new=new, dataset_attributes = ds_att,
+                                            nc_projection=nc_projection, update_projection=update_projection,
+                                            netcdf_compression=setu['netcdf_compression'],
+                                            netcdf_compression_level=setu['netcdf_compression_level'],
+                                            netcdf_compression_least_significant_digit=setu['netcdf_compression_least_significant_digit'])
                         update_projection = False
                         new = False
                         if verbosity > 1: print('Converting bands: Wrote {} ({})'.format(ds, data_full.shape))
             ### end old method
         else:
             print('Pléiades new method')
-
-            if new:
-                gemo = ac.gem.gem(ofile, new = True)
-                gemo.gatts = {k: gatts[k] for k in gatts}
-                datasets = gemo.datasets
-
             ## run through image tiles
             t = time.process_time()
 
@@ -495,15 +483,17 @@ def l1_convert(inputfile, output = None, settings = None):
             if (setu['output_geolocation']):
                 if verbosity > 1: print('Writing geolocation lon/lat')
                 lon, lat = ac.shared.projection_geo(dct, add_half_pixel=True)
-                #ac.output.nc_write(ofile, 'lon', lon, attributes=gatts, new=new, nc_projection=nc_projection)
-                gemo.write('lon', lon)
+                ac.output.nc_write(ofile, 'lon', lon, attributes=gatts, new=new, double=True, nc_projection=nc_projection,
+                                        netcdf_compression=setu['netcdf_compression'],
+                                        netcdf_compression_level=setu['netcdf_compression_level'])
                 if verbosity > 1: print('Wrote lon ({})'.format(lon.shape))
                 lon = None
-                #ac.output.nc_write(ofile, 'lat', lat)
-                gemo.write('lat', lat)
+                ac.output.nc_write(ofile, 'lat', lat, double=True,
+                                        netcdf_compression=setu['netcdf_compression'],
+                                        netcdf_compression_level=setu['netcdf_compression_level'])
                 if verbosity > 1: print('Wrote lat ({})'.format(lat.shape))
                 lat = None
-                #new=False
+                new=False
 
             ## read in TOA reflectances
             for b in rsrd['rsr_bands']:
@@ -511,8 +501,6 @@ def l1_convert(inputfile, output = None, settings = None):
                 bd = None
                 if b in ['Pan', 'PAN']:
                     pan = True
-                    if pmeta is None: continue
-                    if setu['pleiades_skip_pan']: continue
                     tfiles = [f for f in pifiles]
                     bd = {k:pmeta['BAND_INFO'][btags[b]][k] for k in pmeta['BAND_INFO'][btags[b]]}
                     idx = 1
@@ -553,8 +541,6 @@ def l1_convert(inputfile, output = None, settings = None):
                             data_in = ac.shared.read_band(tfile_, idx=idx, sub=sub, warp_to=warp_to_pan, rpc_dem=rpc_dem)
                         nodata = data_in == np.uint16(meta['NODATA'])
                         nodata2 = data_in == 1
-                        saturated = data_in >= np.uint16(meta['SATURATED']) -1
-
                         data_in = data_in.astype(np.float32)
                         if it == 0:
                             data = data_in
@@ -584,32 +570,30 @@ def l1_convert(inputfile, output = None, settings = None):
 
                     ds = 'rhot_{}'.format(rsrd['wave_name'][b])
                     ds_att = {'wavelength':rsrd['wave_nm'][b]}
+                    if percentiles_compute:
+                        ds_att['percentiles'] = percentiles
+                        ds_att['percentiles_data'] = np.nanpercentile(data, percentiles)
 
                     ## write to netcdf file
                     if (ii == 0):
-                        #ac.output.nc_write(ofile, ds, data, attributes=gatts, new=new,
-                        #                   dataset_attributes = ds_att, nc_projection=nc_projection)
-                        #new = False
-                        gemo.write(ds, data, ds_att = ds_att)
+                        ac.output.nc_write(ofile, ds, data, attributes=gatts, new=new,
+                                           dataset_attributes = ds_att, nc_projection=nc_projection,
+                                           netcdf_compression=setu['netcdf_compression'],
+                                           netcdf_compression_level=setu['netcdf_compression_level'],
+                                           netcdf_compression_least_significant_digit=setu['netcdf_compression_least_significant_digit'])
+                        new = False
                     else: ## second iteration is pan at native resolution
-                        #ac.output.nc_write(pofile, ds, data, new=new_pan,
-                        #                   dataset_attributes = ds_att, nc_projection=nc_projection_pan)
-                        #new_pan = False
-                        ## write to netcdf file
-                        gemop = ac.gem.gem(pofile, new = True)
-                        gemop.gatts = {k: gatts[k] for k in gatts}
-                        gemop.nc_projection = nc_projection_pan
-                        gemop.write(ds, data, ds_att = ds_att)
-
+                        ac.output.nc_write(pofile, ds, data, new=new_pan,
+                                           dataset_attributes = ds_att, nc_projection=nc_projection_pan,
+                                           netcdf_compression=setu['netcdf_compression'],
+                                           netcdf_compression_level=setu['netcdf_compression_level'],
+                                           netcdf_compression_least_significant_digit=setu['netcdf_compression_least_significant_digit'])
+                        new_pan = False
                     if verbosity > 1: print('Converting bands: Wrote {} ({})'.format(ds, data.shape))
         if verbosity > 1:
             print('Conversion took {:.1f} seconds'.format(time.time()-t0))
             print('Created {}'.format(ofile))
-        gemo.close()
-        try:
-            gemop.close()
-        except:
-            pass
+
         if ofile not in ofiles: ofiles.append(ofile)
 
     return(ofiles, setu)

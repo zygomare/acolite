@@ -17,7 +17,7 @@ def parse(sensor, settings=None, merge=True):
 
     ## read default settings for sensor
     if (sensor is not None) | (merge):
-        setu = ac.acolite.settings.load(sensor, fill = False)
+        setu = ac.acolite.settings.load(sensor, fill = True)
     else:
         setu = {}
 

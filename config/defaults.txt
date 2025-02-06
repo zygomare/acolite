@@ -34,8 +34,8 @@ station_box_units=km
 limit_buffer=None
 limit_buffer_units=degrees
 ## L1 tile merging
-merge_tiles=False
-merge_full_tiles=False
+merge_tiles=True
+merge_full_tiles=True
 
 ## new output settings
 output=None

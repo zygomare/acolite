@@ -43,6 +43,9 @@ def acolite_l1r(bundle, input_type=None):
     if input_type == None:
         print('{} not recognized.'.format(bundle[0]))
 
+    ## empty setu
+    setu = {}
+
     ################
     ## ACOLITE
     if input_type == 'ACOLITE':
@@ -254,6 +257,13 @@ def acolite_l1r(bundle, input_type=None):
     if input_type == 'HYPSO':
         l1r_files, setu = ac.hypso.l1_convert(bundle)
     ## end HYPSO
+    ################
+
+    ################
+    ## Wyvern
+    if input_type == 'Wyvern':
+        l1r_files, setu = ac.wyvern.l1_convert(bundle)
+    ## end Wyvern
     ################
 
     ## remove extracted files

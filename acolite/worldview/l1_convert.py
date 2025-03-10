@@ -12,10 +12,11 @@
 ##                2025-02-02 (QV) removed percentiles, switched to ac.shared.interp2d
 ##                2025-02-03 (QV) updated tile merging for projected data and user set region of interest
 ##                2025-02-04 (QV) improved settings handling
+##                2025-02-10 (QV) cleaned up settings use
+##                2025-03-01 (QV) added bundle_test to get metafile, added PGC identification
+##                                replaced convert_atmospherically_corrected by worldview_convert_l2 setting
 
-def l1_convert(inputfile, output = None,
-               inputfile_swir = None,
-               convert_atmospherically_corrected = True, settings = None):
+def l1_convert(inputfile, output = None, inputfile_swir = None, settings = None):
 
     import os, glob, dateutil.parser, datetime, time
     import numpy as np
@@ -66,20 +67,12 @@ def l1_convert(inputfile, output = None,
 
         ## parse the metadata
         if verbosity > 1: print('Importing metadata from {}'.format(bundle))
-
-        metafiles = glob.glob('{}/{}'.format(bundle,'*.XML'))
-        metafiles.sort()
-        if len(metafiles)>0:
-            idx = 0
-            if len(metafiles) >= 1:
-                for idx, mf in enumerate(metafiles):
-                    if ('.aux.' not in mf) & ('README' not in mf) & ('(1)' not in mf):
-                        break
-            metafile = metafiles[idx]
-            meta = ac.worldview.metadata_parse(metafile)
-        else:
+        metafile = ac.worldview.bundle_test(bundle)
+        if metafile is None:
             print('No metadata found for {}'.format(bundle))
             continue
+        else:
+            meta = ac.worldview.metadata_parse(metafile)
         sensor = meta['sensor']
 
         ## get sensor specific defaults
@@ -90,10 +83,6 @@ def l1_convert(inputfile, output = None,
         ## end set sensor specific defaults
 
         verbosity = setu['verbosity']
-        #inputfile_swir = setu['inputfile_swir']
-        limit=setu['limit']
-        output_geolocation=setu['output_geolocation']
-        vname = setu['region_name']
         if output is None: output = setu['output']
 
         ## test if we need to do an atmospheric correction
@@ -103,7 +92,17 @@ def l1_convert(inputfile, output = None,
                 print('Image {} is already corrected by supplier.'.format(bundle))
                 print('RADIOMETRICLEVEL: {} RADIOMETRICENHANCEMENT: {}'.format(meta['RADIOMETRICLEVEL'], meta['RADIOMETRICENHANCEMENT']))
                 atmospherically_corrected = True
-                if not convert_atmospherically_corrected: continue
+                if not setu['worldview_convert_l2']: continue
+
+        ## test if we have PGC bundle
+        pgc_bundle = False
+        if meta['PGC']:
+            pgc_bundle = True
+            if meta['PGC_STRETCH'] in ['mr']:
+                print('Image {} is already corrected by supplier.'.format(bundle))
+                print('PGC_STRETCH: {}'.format(meta['PGC_STRETCH']))
+                atmospherically_corrected = True
+                if not setu['worldview_convert_l2']: continue
 
         ## parse the metadata
         if swir_bundle is not None:
@@ -165,9 +164,10 @@ def l1_convert(inputfile, output = None,
         if atmospherically_corrected: gatts['acolite_file_type'] = 'converted'
 
         stime = dateutil.parser.parse(gatts['isodate'])
-        oname = '{}_{}'.format(gatts['sensor'], stime.strftime('%Y_%m_%d_%H_%M_%S'))
-        if vname != '': oname+='_{}'.format(vname)
 
+        ## set up oname (without directory or file type) and ofile (with directory and file type)
+        oname = '{}_{}'.format(gatts['sensor'], stime.strftime('%Y_%m_%d_%H_%M_%S'))
+        if setu['region_name'] != '': oname+='_{}'.format(setu['region_name'])
         ofile = '{}/{}_{}.nc'.format(output, oname, gatts['acolite_file_type'])
         gatts['oname'] = oname
         gatts['ofile'] = ofile
@@ -195,6 +195,7 @@ def l1_convert(inputfile, output = None,
                 tile = ''
 
             file = '{}/{}'.format(bundle,tile_mdata['FILENAME'])
+
             ## check if the files were named .TIF instead of .TIFF
             if not os.path.exists(file): file = file.replace('.TIFF', '.TIF')
             if not os.path.exists(file): continue
@@ -204,6 +205,27 @@ def l1_convert(inputfile, output = None,
                 dct_vnir = ac.shared.projection_read(file)
             except:
                 dct_vnir = None
+
+            # ## shall we reproject the inputfile?
+            # ## to add swir bundle
+            # reproject = setu['reproject_inputfile_force'] | (setu['reproject_inputfile'] & (dct_vnir == None))
+            # if reproject:
+            #     setu['export_geotiff_match_file'] = None ## OG extent will no longer match
+            #     bn = os.path.basename(file)
+            #     bn, ext = os.path.splitext(bn)
+            #     ifile = '{}'.format(file)
+            #     rfile = '{}/{}_reprojected{}'.format(output, bn, ext)
+            #     print(ifile)
+            #     print(rfile)
+            #     #from osgeo import gdal
+            #     #print('Reprojecting {} to {}'.format(ifile, file))
+            #     #dso = gdal.Warp(file, ifile) ## warp to gdal defaults
+            #     file, (dimxo, dimyo) = ac.shared.warp_inputfile(ifile, target=rfile)
+            #     ## update global dims
+            #     global_dims = dimyo, dimxo
+            #     print(file)
+            #     #dso = None
+            #     dct_vnir = ac.shared.projection_read(file)
 
             ## get projection info
             try:
@@ -249,8 +271,8 @@ def l1_convert(inputfile, output = None,
         ## final scene dimensions
         if dct is not None:
             ## if we have dct and limit we can subset
-            if limit is not None:
-                dct_sub = ac.shared.projection_sub(dct, limit, four_corners=True)
+            if setu['limit'] is not None:
+                dct_sub = ac.shared.projection_sub(dct, setu['limit'], four_corners=True)
                 if dct_sub['out_lon']:
                     if verbosity > 1: print('Longitude limits outside {}'.format(bundle))
                     continue
@@ -269,7 +291,7 @@ def l1_convert(inputfile, output = None,
             dct['ydim'] = int(np.round((dct['yrange'][1]-dct['yrange'][0]) / dct['pixel_size'][1]))
 
             ## these should match the global dims from metadata
-            if limit is None:
+            if setu['limit'] is None:
                 if (global_dims[0] != dct['ydim']) |  (global_dims[1] != dct['xdim']):
                     print('Global dims and projection size do not match')
                     print(global_dims[1], dct['xdim'])
@@ -289,7 +311,7 @@ def l1_convert(inputfile, output = None,
         new = False
 
         ## write lat/lon
-        if output_geolocation:
+        if setu['output_geolocation']:
             if verbosity > 1: print('{} - Writing lat/lon'.format(datetime.datetime.now().isoformat()[0:19]))
             if dct is not None: ## compute from projection info
                 print('lat/lon computed from projection info')
@@ -349,6 +371,14 @@ def l1_convert(inputfile, output = None,
                 if not os.path.exists(file): file = file.replace('.TIFF', '.TIF')
                 if not os.path.exists(file): continue
 
+                # ## to add swir bundle?
+                # if reproject:
+                #     bn = os.path.basename(file)
+                #     bn, ext = os.path.splitext(bn)
+                #     ifile = '{}'.format(file)
+                #     file = '{}/{}_reprojected{}'.format(output, bn, ext)
+                #     print(file)
+
                 ## get tile from wv3 swir bundle if provided
                 swir_file=None
                 if swir_bundle is not None:
@@ -359,6 +389,7 @@ def l1_convert(inputfile, output = None,
                             continue
                 ## end swir bundle
 
+                ## get band scaling factors cf
                 if 'SWIR' not in band:
                     bt = [bt for bt in meta['BAND_INFO'] if meta['BAND_INFO'][bt]['name'] == band][0]
                     d = ac.shared.read_band(file, idx=meta['BAND_INFO'][bt]['index'], sub=sub, warp_to=warp_to)
@@ -381,20 +412,35 @@ def l1_convert(inputfile, output = None,
                         print('Data has been enhanced by the provider: {}'.format(meta['RADIOMETRICENHANCEMENT']))
 
                 ## track mask
-                if d.dtype == np.dtype('uint8'):
+                dtype = d.dtype
+                if dtype == np.dtype('uint8'):
                     nodata = d == np.uint8(0)
-                elif d.dtype == np.dtype('uint16'):
+                elif dtype == np.dtype('uint16'):
                     nodata = d == np.uint16(0)
+                elif dtype == np.dtype('float32'):
+                    nodata = d == np.float32(0)
+
+                ## override cf for PGC bundle
+                if pgc_bundle:
+                    if dtype == np.dtype('uint8'): cf = 1/200.
+                    elif dtype == np.dtype('uint16'): cf = 1/2000.
+                    else : cf = 1.0
+                    print('PGC scaling factor for stretch {}, dtype {}: {:.4f}'.format(meta['PGC_STRETCH'], dtype, cf))
+                    cf *= (gatts['se_distance']**2) / gatts['mus']
+                    print('PGC scaling factor with sun earth distance and zenith angle: {:.4f}'.format(cf))
 
                 ## convert to float and scale to TOA reflectance
                 d = d.astype(np.float32) * cf
-                if (gains != None) & (setu['gains_parameter'] == 'radiance'):
-                    print('Applying gain {} and offset {} to TOA radiance for band {}'.format(gains[band]['gain'], gains[band]['offset'], band))
-                    d = gains[band]['gain'] * d + gains[band]['offset']
-                d *= (np.pi * gatts['se_distance']**2) / (f0_b[band]/10. * gatts['mus'])
-                if (gains != None) & (setu['gains_parameter'] == 'reflectance'):
-                    print('Applying gain {} and offset {} to TOA reflectance for band {}'.format(gains[band]['gain'], gains[band]['offset'], band))
-                    d = gains[band]['gain'] * d + gains[band]['offset']
+
+                ## convert from original MAXAR bundle
+                if not pgc_bundle:
+                    if (gains != None) & (setu['gains_parameter'] == 'radiance'):
+                        print('Applying gain {} and offset {} to TOA radiance for band {}'.format(gains[band]['gain'], gains[band]['offset'], band))
+                        d = gains[band]['gain'] * d + gains[band]['offset']
+                    d *= (np.pi * gatts['se_distance']**2) / (f0_b[band]/10. * gatts['mus'])
+                    if (gains != None) & (setu['gains_parameter'] == 'reflectance'):
+                        print('Applying gain {} and offset {} to TOA reflectance for band {}'.format(gains[band]['gain'], gains[band]['offset'], band))
+                        d = gains[band]['gain'] * d + gains[band]['offset']
 
                 ## apply mask
                 d[nodata] = np.nan

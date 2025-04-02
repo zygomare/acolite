@@ -228,7 +228,7 @@ flag_exponent_dem_shadow=6
 
 ## atmospheric correction settings
 atmospheric_correction=True
-atmospheric_correction_method=dark_spectrum
+atmospheric_correction_method=radcor
 
 ## gas transmittance settings
 gas_transmittance=True

@@ -104,6 +104,7 @@ def l1_convert(inputfile, output = None, settings = None):
         se_distance = ac.shared.distance_se(doy)
         isodate = dtime.isoformat()
 
+
         ## read rsr
         sensor = meta['sensor']
         rsrd = ac.shared.rsr_dict(sensor)[sensor]

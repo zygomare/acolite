@@ -46,6 +46,7 @@ def bundle_test(bundle_in):
     files.sort()
 
     datafiles = {}
+    is_composite = True if os.path.join(bundle, 'composite.tif') in files or os.path.join(bundle, 'composite_file_format.tif') in files else False
     for i, file in enumerate(files):
         fname = os.path.basename(file)
         fn,ext = os.path.splitext(fname)
@@ -99,4 +100,23 @@ def bundle_test(bundle_in):
         if os.path.isfile(file):
             if scene_id not in datafiles: datafiles[scene_id] = {}
             datafiles[scene_id][band] = {"path":file, "fname":fname, "ext": ext}
+    if is_composite:
+        print('section is composite for Planet')
+        for scene_id in datafiles.keys():
+            if os.path.exists(os.path.join(bundle, 'composite.tif')):
+                datafiles[scene_id]['composite'] = {"path": os.path.join(bundle, 'composite.tif'), "fname": 'composite.tif',
+                                                    "ext": '.tif'}
+            if os.path.exists(os.path.join(bundle, 'composite_udm2.tif')):
+                datafiles[scene_id]['composite_udm2'] = {"path": os.path.join(bundle, 'composite_udm2.tif'),
+                                                        "fname": 'composite_udm2.tif',
+                                                        "ext": '.tif'}
+
+            if os.path.exists(os.path.join(bundle, 'composite_file_format.tif')):
+                datafiles[scene_id]['composite'] = {"path": os.path.join(bundle, 'composite_file_format.tif'),
+                                                    "fname": 'composite_file_format.tif',
+                                                    "ext": '.tif'}
+            if os.path.exists(os.path.join(bundle, 'composite_udm2_file_format.tif')):
+                datafiles[scene_id]['composite_udm2'] = {"path": os.path.join(bundle, 'composite_udm2_file_format.tif'),
+                                                         "fname": 'composite_udm2_file_format.tif',
+                                                         "ext": '.tif'}
     return(datafiles)
